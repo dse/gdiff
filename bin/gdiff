@@ -183,11 +183,15 @@ main () {
         -o -iname '*.tar'       # quasi-binary
     )
 
+    # onlyin "${AA}" "${BB}"
+
     # Remove binaries, as this is not intended to be an exhaustive
     # diff.  Just find differences in **text**.
     find "${AA}" "${BB}" -type f \( "${exclude[@]}" \) -exec rm {} +
     find "${AA}" "${BB}" -type f -exec perl -e 'do { unlink($_) if -B $_ } foreach @ARGV' {} +
-    find "${AA}" "${BB}" -type f -exec "${gdiff_pp}" -i {} +
+
+    # Normalize differences in each file.
+    find "${AA}" "${BB}" -type f \( -name '*.html' -o -iname '*.htm' \) -exec "${gdiff_pp}" {} +
 
     export GIT_PAGER="less -iRX -+S"
 
