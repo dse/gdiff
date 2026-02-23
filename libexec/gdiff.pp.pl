@@ -2,7 +2,6 @@
 use warnings;
 use strict;
 use open IO => qw(:locale);
-
 use HTML::Entities qw(decode_entities);
 use File::Temp qw(tempfile);
 use File::Basename qw(dirname);
@@ -15,6 +14,15 @@ Getopt::Long::GetOptions('i|in-place|inplace' => \$opt_in_place)
   or die(":-(\n");
 
 @ARGV = grep { !-B $_ } @ARGV;  # don't POSTPROCESS binary files
+
+my $XDG_CONFIG_HOME = $ENV{"XDG_CONFIG_HOME"} // "$ENV{HOME}/.config";
+my $GDIFF_PP_PL = "${XDG_CONFIG_HOME}/gdiff/gdiff.pp.pl";
+
+if (defined $GDIFF_PP_PL) {
+    do $GDIFF_PP_PL;
+} else {
+    undef $GDIFF_PP_PL;
+}
 
 foreach my $filename (@ARGV) {
     my $blank_so_far = 1;
@@ -47,6 +55,10 @@ foreach my $filename (@ARGV) {
         s{^(\s*)<!doctype}{<!DOCTYPE} if $blank_so_far;
         s{ class=""}{};
         $_ = decode_entities($_);
+
+        if (defined $GDIFF_PP_PL) {
+            gdiff_pp();
+        }
 
         $modified ||= ($_ ne $orig_line);
         $blank_so_far = 0 if /\S/;

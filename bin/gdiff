@@ -191,7 +191,7 @@ main () {
     find "${AA}" "${BB}" -type f -exec perl -e 'do { unlink($_) if -B $_ } foreach @ARGV' {} +
 
     # Normalize differences in each file.
-    find "${AA}" "${BB}" -type f \( -name '*.html' -o -iname '*.htm' \) -exec "${gdiff_pp}" {} +
+    find "${AA}" "${BB}" -type f \( -name '*.html' -o -iname '*.htm' \) -exec "${gdiff_pp}" -i {} +
 
     export GIT_PAGER="less -iRX -+S"
 
