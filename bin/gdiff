@@ -181,6 +181,7 @@ main () {
         -o -iname '*.zip'
         -o -iname '*.tar.*'
         -o -iname '*.tar'       # quasi-binary
+        -o -iname '*.svg'       # quasi-binary
     )
 
     # onlyin "${AA}" "${BB}"
