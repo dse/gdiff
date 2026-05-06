@@ -1,232 +1,159 @@
 #!/usr/bin/env bash
-#
-# gdiff - use `git diff --no-index` to print differences of two
-# directory trees.
-#
-# I had to write this for two reasons:
-#
-# - `git diff --no-index` has issues if either directory tree is in a
-#   git working tree.
-#
-# - there is no native way to exclude files from `git diff
-#   --no-index`.
-#
-# This tool "copies" both directory trees to a directory tree
-# (presumably) outside any git repository but on the same filesystem
-# using hard links.
-#
-# This tool also does some processing on certain files via external
-# utilities which write to temporary files then renames them to avoid
-# changing the original files.
-#
 set -o errexit
 set -o pipefail
 set -o nounset
 shopt -s lastpipe
 
-bindir="$(dirname "$0")"
-libexecdir="${bindir}/../libexec"
-
-gdiff_ln="${libexecdir}/gdiff.ln.sh"
-gdiff_pp="${libexecdir}/gdiff.pp.pl"
-gdiff_diffpp="${libexecdir}/gdiff.diffpp.pl"
-
-declare -a git_diff_options=()
-declare -a gdiff_diffpp_options=()
-declare -a gdiff_pp_options=()
-declare -a gdiff_ln_options=()
+trap cleanup EXIT
 
 main () {
-    verbose=0
-    declare -i w=0
-    declare -i dashdash
-    while getopts "X:xvhw-:{" OPTION ; do
-        dashdash=0
-        if [[ "${OPTION}" = "-" ]] ; then
-            dashdash=1
-            case "${OPTARG}" in
-                '')             # "--"
-                    OPTIND=$((OPTIND + 1))
-                    break
-                    ;;
-                *=*)            # "--name=value"
-                    OPTION="${OPTARG%%=*}"
-                    OPTARG="${OPTARG#*=}"
-                    ;;
-                *)              # "--name"
-                    OPTION="${OPTARG}"
-                    unset OPTARG
-                    ;;
-            esac
-        fi
-        get_required_arg () {
-            if [[ ! -v OPTARG ]] ; then
-                if (( OPTIND > $# )) ; then
-                    echo "$0: option missing required argument -- ${OPTION}" >&2
-                    exit 1
-                fi
-                OPTARG="${!OPTIND}"
-                OPTIND=$((OPTIND + 1))
-            fi
-        }
-        case "${OPTION}" in
-            "{")
-                while true ; do
-                    if (( $OPTIND > ${#@} )) ; then
-                        break
-                    fi
-                    if [[ "${!OPTIND}" == "-}" ]] ; then
-                        OPTIND=$((OPTIND + 1))
-                        break
-                    fi
-                    git_diff_options+=("${!OPTIND}")
-                    OPTIND=$((OPTIND + 1))
-                done
-                ;;
-            h|help)
-                usage
-                exit 0
-                ;;
-            v|verbose)
-                gdiff_diffpp_options+=(-v)
-                gdiff_pp_options+=(-v)
-                gdiff_ln_options+=(-v)
-                verbose=$((verbose+1))
-                set -o xtrace
-                ;;
-            x)
-                gdiff_diffpp_options+=(-x)
-                ;;
+    ignore_all_space=0
+    word_diff=0
+    declare -a git_diff_options=()
+    while getopts 'wbaU:' OPTION ; do
+        case "$OPTION" in
             w)
-                w+=1
-                if (( w == 1 )) ; then
-                    git_diff_options+=(-w)
-                elif (( w == 2 )) ; then
+                if (( ignore_all_space )) ; then
+                    word_diff=1
                     git_diff_options+=(--word-diff)
-                elif (( w == 3 )) ; then
-                    git_diff_options+=(--minimal)
                 else
-                    echo "$0: cannot specify -w more than twice" >&2
-                    exit 1
+                    ignore_all_space=1
+                    git_diff_options+=(-w)
                 fi
                 ;;
-            X)
-                get_required_arg "$@"
-                git_diff_options+=("${OPTARG}")
+            b)
+                git_diff_options+=(-b) # --ignore-space-change
                 ;;
-            exclude)
-                get_required_arg "$@"
-                gdiff_pp_options+=(--exclude "${OPTARG}")
+            a)
+                git_diff_options+=(-a) # --text
+                ;;
+            U)
+                git_diff_options+=(-U"${OPTARG}")
                 ;;
             *)
-                if (( dashdash )) ; then
-                    echo "$0: illegal option -- ${OPTION}"
-                fi
                 exit 1
                 ;;
         esac
     done
-    shift $((OPTIND-1))
+    shift $((OPTIND - 1))
+
     if (( $# < 2 )) ; then
-        echo "$0: not enough arguments" >&2
+        echo "gdiff: not enough arguments >&2"
+        exit 1
+    elif (( $# > 2 )) ; then
+        echo "gdiff: too many arguments >&2"
         exit 1
     fi
-    if (( $# > 2 )) ; then
-        echo "$0: too many arguments" >&2
+
+    a="$1"
+    b="$2"
+
+    # If arguments are the same file, exit early
+    #--------------------------------------------------------------------------
+
+    realpath_a="$(realpath "${a}")"
+    realpath_b="$(realpath "${b}")"
+    if [[ "${realpath_a}" -ef "${realpath_b}" ]] ; then
+        echo "gdiff: paths specified are the same file"
         exit 1
     fi
-    A="$(realpath "${1}")"
-    B="$(realpath "${2}")"
-    if [[ -f "${A}" && -f "${B}" ]] ; then
+
+    # Both arguments must be files or both arguments must be directories.
+    #--------------------------------------------------------------------------
+
+    if [[ -f "${a}" ]] && [[ -f "${b}" ]] ; then
         targets_are=files
-    elif [[ -d "${A}" && -d "${B}" ]] ; then
+    elif [[ -d "${a}" ]] && [[ -d "${b}" ]] ; then
         targets_are=directories
     else
-        echo "$0: cannot compare incompatible targets" >&2
-        type_A="$(stat --format=%F "${A}")" >&- || type_A="does not exit"
-        type_B="$(stat --format=%F "${B}")" >&- || type_B="does not exit"
-        echo "    ${A}: ${type_A}" >&2
-        echo "    ${B}: ${type_B}" >&2
+        echo "gdiff: incompatible targets" >&2
         exit 1
     fi
-    AA="$("${gdiff_ln}" "${A}")"
-    BB="$("${gdiff_ln}" "${B}")"
-    set -o xtrace
 
-    declare -a exclude=(
-        -iname '*.pdf'          # quasi-binary
-        -o -iname '*.jpg'
-        -o -iname '*.jpeg'
-        -o -iname '*.png'
-        -o -iname '*.gif'
-        -o -iname '*.mp4'
-        -o -iname '*.mp3'
-        -o -iname '*.avi'
-        -o -iname '*.wma'
-        -o -iname '*.wmv'
-        -o -iname '*.qt'
-        -o -iname '*.xlsx'
-        -o -iname '*.pptx'
-        -o -iname '*.docx'
-        -o -iname '*.xls'       # quasi-binary
-        -o -iname '*.ppt'       # quasi-binary
-        -o -iname '*.doc'       # quasi-binary
-        -o -iname '*.ttf'
-        -o -iname '*.otf'
-        -o -iname '*.eot'
-        -o -iname '*.woff'      # quasi-binary
-        -o -iname '*.woff2'     # quasi-binary
-        -o -iname '*.psd'
-        -o -iname '*.jar'
-        -o -iname '*.zip'
-        -o -iname '*.tar.*'
-        -o -iname '*.tar'       # quasi-binary
-        -o -iname '*.svg'       # quasi-binary
-    )
+    # If files, the rigmarole below about directories isn't required.
+    #--------------------------------------------------------------------------
 
-    # onlyin "${AA}" "${BB}"
+    if [[ "$targets_are" == files ]] ; then
+        exec git diff --no-index "${git_diff_options[@]}" "${a}" "${b}"
+    fi
 
-    # Remove binaries, as this is not intended to be an exhaustive
-    # diff.  Just find differences in **text**.
-    find "${AA}" "${BB}" -type f \( "${exclude[@]}" \) -exec rm {} +
-    find "${AA}" "${BB}" -type f -exec perl -e 'do { unlink($_) if -B $_ } foreach @ARGV' {} +
+    # Since git-diff(1) can't exclude files, we create our own
+    # directory trees of hard links to the directory tree arguments.
+    # --------------------------------------------------------------------------
 
-    # Normalize differences in each file.
-    find "${AA}" "${BB}" -type f \( -name '*.html' -o -iname '*.htm' \) -exec "${gdiff_pp}" -i {} +
+    # Compute the .gdiff directories' paths.  NOTE: These need to be
+    # in the same filesystem.
+    sum_a="$(realpath "${a}" | sha1sum | awk '{print $1}')"
+    sum_b="$(realpath "${b}" | sha1sum | awk '{print $1}')"
+    gdiff_a="${a}/.gdiff/${sum_a}"
+    gdiff_b="${b}/.gdiff/${sum_b}"
 
-    export GIT_PAGER="less -iRX -+S"
+    # Clean up and recreate.
+    rm -fr "${gdiff_a}"
+    rm -fr "${gdiff_b}"
+    mkdir -p "${gdiff_a}"
+    mkdir -p "${gdiff_b}"
 
-    declare -a git_diff_cmd=(
-        git --no-pager \
-            diff \
-            --no-index \
-            --color=always \
-            --diff-filter=ad \
-            --ignore-blank-lines \
-            "${git_diff_options[@]}" \
-            "$AA" "$BB"
-    )
+    # Clean up again later.
+    cleanup+=("${gdiff_a}" "${gdiff_b}")
 
-    "${git_diff_cmd[@]}" | "${gdiff_diffpp}" "${gdiff_diffpp_options[@]}" | less -iRX -+S
+    # Does the dirty work of creating directory trees of hard links.
+    rlink "${a}" "${gdiff_a}"
+    rlink "${b}" "${gdiff_b}"
 
-    # excludes added and deleted paths.
+    # Do the dirty work.
+    # --------------------------------------------------------------------------
+
+    # In git diff output, display paths relative to the .gdiff directories.
+    replace_a="a/${gdiff_a#/}"
+    replace_b="b/${gdiff_b#/}"
+
+    # Match color escapes.
+    color_rx='\e\[[0-9:;]*m'
+
+    git diff --color=always --no-index "${git_diff_options[@]}" "${gdiff_a}" "${gdiff_b}" |
+        sed -E -e '
+            /^(\x1b\[[0-9:;]*m)*(diff --git |--- |\+\+\+ )/{
+                s~ '"${replace_a}"'~ a~
+                s~ '"${replace_b}"'~ b~
+            }
+        '
 }
-declare -a filenames_A
-declare -a filenames_B
-usage () { cat <<EOF; }
-gdiff [-xvh] <dir1> <dir2>
-    -x, --inverse       inverse
-    -v, --verbose       increase verbosity
-    -w                  ignore whitespace when comparing lines
-    -ww                 add word diff
-    -www                add --minimal
-    -X<arg>             pass <arg> to git diff as option argument
-                            e.g., -X--minimal
-                                  -X--diff-filter=ad
-                                  -X--diff-filter -Xad
-    -{ <arg> ... -}     pass multiple <arg>s to git diff as option arguments
-                            e.g., -{ --minimal --diff-filter=ad -}
-    -h, --help          print this help message
-EOF
+
+rlink () {
+    local src="$1"
+    local dst="$2"
+    {
+        # Avoid recursion by not traversing .gdiff directories or the
+        # destination directory (in case it's inside the source
+        # directory).
+        find "$src" \
+             \! \( -type d -name .gdiff -prune \) \
+             \! \( -type d -name .git -prune \) \
+             \! \( -type d -path "${dst}" -prune \) \
+             \( -type d -printf 'DIR %P\n' \) -o \
+             \( -type f -printf 'FILE %P\n' \)
+    } | {
+        while read filetype filename ; do
+            if [[ "$filetype" == DIR ]] ; then
+                mkdir -p "$dst/$filename" || true
+            else
+                if [[ -e "$dst/$filename" ]] && [[ "$src/$filename" -ef "$dst/$filename" ]] ; then
+                    : # already hardlinked
+                else
+                    ln "$src/$filename" "$dst/$filename" || true
+                fi
+            fi
+        done
+    }
+}
+
+declare -a cleanup=()
+
+cleanup () {
+    for file in "${cleanup[@]}" ; do
+        rm -fr "${file}" || true
+    done
+}
 
 main "$@"
