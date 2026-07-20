@@ -158,14 +158,8 @@ rlink () {
 }
 
 cleanup () {
-    echo "Cleaning up..." >&2
     for varname in temp_a temp_b temp_stdin ; do
-        echo "[[ -v ${varname} ]] ?" >&2
-        if [[ -v "${varname}" ]] ; then
-            echo "${varname} ${!varname}" >&2
-        fi
         if [[ -v "${varname}" ]] && [[ "${!varname}" != "" ]] ; then
-            echo "removing ${!varname}" >&2
             rm -fr "${!varname}" || true
         fi
     done
