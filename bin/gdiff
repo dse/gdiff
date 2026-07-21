@@ -58,11 +58,12 @@ main () {
         exit 1
     fi
 
-    # Both arguments must be files or both arguments must be
-    # directories.  If one of the arguments is a file, "-" can be the
-    # other argument, and will stand for stdin.
+    # Both arguments must be files (or named pipes) or both arguments
+    # must be directories.  If one of the arguments is a file, "-" can
+    # be the other argument, and will stand for stdin.
     # --------------------------------------------------------------------------
 
+    # If either of the arguments is a named pipe, convert it to a file.
     if [[ -p "${a}" ]] ; then
         temp_a="$(mktemp)"
         cat "${a}" >"${temp_a}"
@@ -74,18 +75,23 @@ main () {
         b="${temp_b}"
     fi
 
-    if [[ -f "${a}" ]] && [[ -f "${b}" ]] ; then
-        targets_are=files
-    elif [[ "${a}" == "-" ]] && [[ -f "${b}" ]] ; then
-        targets_are=files
+    # If either argument (but not both) is "-", we read from standard
+    # input.
+    if [[ "${a}" == "-" ]] && [[ "${b}" == "-" ]] ; then
+        echo "gdiff: both files cannot be standard input" >&2
+        exit 1
+    elif [[ "${a}" == "-" ]] ; then
         temp_stdin="$(mktemp)"
         cat >"${temp_stdin}"
         a="${temp_stdin}"
-    elif [[ -f "${a}" ]] && [[ "${b}" == "-" ]] ; then
-        targets_are=files
+    elif [[ "${b}" == "-" ]] ; then
         temp_stdin="$(mktemp)"
         cat >"${temp_stdin}"
         b="${temp_stdin}"
+    fi
+
+    if [[ -f "${a}" ]] && [[ -f "${b}" ]] ; then
+        targets_are=files
     elif [[ -d "${a}" ]] && [[ -d "${b}" ]] ; then
         targets_are=directories
     else
