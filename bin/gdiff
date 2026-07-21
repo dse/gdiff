@@ -63,6 +63,17 @@ main () {
     # other argument, and will stand for stdin.
     # --------------------------------------------------------------------------
 
+    if [[ -p "${a}" ]] ; then
+        temp_a="$(mktemp)"
+        cat "${a}" >"${temp_a}"
+        a="${temp_a}"
+    fi
+    if [[ -p "${b}" ]] ; then
+        temp_b="$(mktemp)"
+        cat "${b}" >"${temp_b}"
+        b="${temp_b}"
+    fi
+
     if [[ -f "${a}" ]] && [[ -f "${b}" ]] ; then
         targets_are=files
     elif [[ "${a}" == "-" ]] && [[ -f "${b}" ]] ; then
@@ -78,7 +89,9 @@ main () {
     elif [[ -d "${a}" ]] && [[ -d "${b}" ]] ; then
         targets_are=directories
     else
-        echo "gdiff: incompatible targets" >&2
+        echo "gdiff: incompatible targets ${a} and ${b}" >&2
+        /bin/ls -l "${a}" >&2 || true
+        /bin/ls -l "${b}" >&2 || true
         exit 1
     fi
 
