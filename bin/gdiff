@@ -105,7 +105,9 @@ main () {
     #--------------------------------------------------------------------------
 
     if [[ "$targets_are" == files ]] ; then
-        git diff --no-index "${git_diff_options[@]}" "${a}" "${b}"
+        git -c diff.html.cachetextconv=false \
+            diff --no-index "${git_diff_options[@]}" "${a}" "${b}"
+        return
     fi
 
     # Since git-diff(1) can't exclude files, we create our own
@@ -120,8 +122,8 @@ main () {
     temp_b="${b}/.gdiff/${sum_b}"
 
     # Clean up and recreate.
-    rm -fr "${temp_a}"
-    rm -fr "${temp_b}"
+    rm -fr "${temp_a}" || true
+    rm -fr "${temp_b}" || true
     mkdir -p "${temp_a}"
     mkdir -p "${temp_b}"
 
