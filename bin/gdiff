@@ -7,11 +7,18 @@ shopt -s lastpipe
 trap cleanup EXIT
 
 main () {
+    declare -a inplace=()
+    declare -a inplace_temp_cmd
+
     ignore_all_space=0
     word_diff=0
     declare -a git_diff_options=()
-    while getopts 'wbaU:' OPTION ; do
+    while getopts 'hi:wbaU:' OPTION ; do
         case "$OPTION" in
+            h)
+                usage
+                exit 0
+                ;;
             w)
                 if (( ignore_all_space )) ; then
                     word_diff=1
@@ -30,19 +37,40 @@ main () {
             U)
                 git_diff_options+=(-U"${OPTARG}")
                 ;;
+            i)
+                inplace_temp_cmd=("${OPTARG}")
+                terminated=0
+                while (( OPTIND <= $# )) ; do
+                    if [[ "${!OPTIND}" == \; ]] ; then
+                        terminated=1
+                        OPTIND=$((OPTIND + 1))
+                        break
+                    fi
+                    inplace_temp_cmd+=("${!OPTIND}")
+                    OPTIND=$((OPTIND + 1))
+                done
+                if (( !terminated )) ; then
+                    echo "inplace command not terminated with \\;" >&2
+                    exit 2
+                fi
+                inplace_count="${#inplace[@]}"
+                inplace_varname="inplace_${inplace_count}"
+                inplace+=("${inplace_varname}")
+                eval "declare -a ${inplace_varname}=(\"\${inplace_temp_cmd[@]}\")"
+                ;;
             *)
-                exit 1
+                exit 2
                 ;;
         esac
     done
     shift $((OPTIND - 1))
 
     if (( $# < 2 )) ; then
-        echo "gdiff: not enough arguments >&2"
-        exit 1
+        echo "gdiff: not enough arguments" >&2
+        exit 2
     elif (( $# > 2 )) ; then
-        echo "gdiff: too many arguments >&2"
-        exit 1
+        echo "gdiff: too many arguments" >&2
+        exit 2
     fi
 
     a="$1"
@@ -63,16 +91,18 @@ main () {
     # be the other argument, and will stand for stdin.
     # --------------------------------------------------------------------------
 
-    # If either of the arguments is a named pipe, convert it to a file.
+    # If either of the arguments is a named pipe (à la `gdiff <(a)
+    # <(b)`) write its contents to a file and have `git diff` read
+    # from the file.
     if [[ -p "${a}" ]] ; then
-        temp_a="$(mktemp)"
-        cat "${a}" >"${temp_a}"
-        a="${temp_a}"
+        temp_file_a="$(mktemp)"
+        cat "${a}" >"${temp_file_a}"
+        a="${temp_file_a}"
     fi
     if [[ -p "${b}" ]] ; then
-        temp_b="$(mktemp)"
-        cat "${b}" >"${temp_b}"
-        b="${temp_b}"
+        temp_file_b="$(mktemp)"
+        cat "${b}" >"${temp_file_b}"
+        b="${temp_file_b}"
     fi
 
     # If either argument (but not both) is "-", we read from standard
@@ -81,13 +111,13 @@ main () {
         echo "gdiff: both files cannot be standard input" >&2
         exit 1
     elif [[ "${a}" == "-" ]] ; then
-        temp_stdin="$(mktemp)"
-        cat >"${temp_stdin}"
-        a="${temp_stdin}"
+        temp_file_stdin="$(mktemp)"
+        cat >"${temp_file_stdin}"
+        a="${temp_file_stdin}"
     elif [[ "${b}" == "-" ]] ; then
-        temp_stdin="$(mktemp)"
-        cat >"${temp_stdin}"
-        b="${temp_stdin}"
+        temp_file_stdin="$(mktemp)"
+        cat >"${temp_file_stdin}"
+        b="${temp_file_stdin}"
     fi
 
     if [[ -f "${a}" ]] && [[ -f "${b}" ]] ; then
@@ -105,6 +135,7 @@ main () {
     #--------------------------------------------------------------------------
 
     if [[ "$targets_are" == files ]] ; then
+        run_inplace_edits "${a}" "${b}"
         git -c diff.html.cachetextconv=false \
             diff --no-index "${git_diff_options[@]}" "${a}" "${b}"
         return
@@ -118,30 +149,48 @@ main () {
     # in the same filesystem.
     sum_a="$(realpath "${a}" | sha1sum | awk '{print $1}')"
     sum_b="$(realpath "${b}" | sha1sum | awk '{print $1}')"
-    temp_a="${a}/.gdiff/${sum_a}"
-    temp_b="${b}/.gdiff/${sum_b}"
+    temp_file_a="${a}/.gdiff/${sum_a}"
+    temp_file_b="${b}/.gdiff/${sum_b}"
 
     # Clean up and recreate.
-    rm -fr "${temp_a}" || true
-    rm -fr "${temp_b}" || true
-    mkdir -p "${temp_a}"
-    mkdir -p "${temp_b}"
+    rm -fr "${temp_file_a}" || true
+    rm -fr "${temp_file_b}" || true
+    mkdir -p "${temp_file_a}"
+    mkdir -p "${temp_file_b}"
 
     # Does the dirty work of creating directory trees of hard links.
-    rlink "${a}" "${temp_a}"
-    rlink "${b}" "${temp_b}"
+    rlink "${a}" "${temp_file_a}"
+    rlink "${b}" "${temp_file_b}"
 
     # Do the dirty work.
     # --------------------------------------------------------------------------
 
     # In git diff output, display paths relative to the .gdiff directories.
-    replace_a="a/${temp_a#/}"
-    replace_b="b/${temp_b#/}"
+    replace_a="a/${temp_file_a#/}"
+    replace_b="b/${temp_file_b#/}"
 
     # Match color escapes.
     color_rx='\e\[[0-9:;]*m'
 
-    git diff --color=always --no-index "${git_diff_options[@]}" "${temp_a}" "${temp_b}" |
+    if (( ${#inplace[@]} )) ; then
+        echo "running in-place edits..." >&2
+        declare -a files
+        find "${temp_file_a}" "${temp_file_b}" -type f | readarray -t files
+        declare file_count=0
+        for file in "${files[@]}" ; do
+            file_count=$((file_count + 1))
+            if [[ -t 2 ]] ; then
+                echo -n $'\r'"${file_count}/${#files[@]}"$'\e[K' >&2
+            fi
+            run_inplace_edits "${file}"
+        done
+        if [[ -t 2 ]] ; then
+            echo -n $'\r\e[K' >&2
+        fi
+        echo "finished running in-place edits" >&2
+    fi
+
+    git diff --color=always --no-index "${git_diff_options[@]}" "${temp_file_a}" "${temp_file_b}" |
         sed -E -e '
             /^(\x1b\[[0-9:;]*m)*(diff --git |--- |\+\+\+ )/{
                 s~ '"${replace_a}"'~ a~
@@ -179,11 +228,43 @@ rlink () {
 }
 
 cleanup () {
-    for varname in temp_a temp_b temp_stdin ; do
+    for varname in temp_file_a temp_file_b temp_file_stdin ; do
         if [[ -v "${varname}" ]] && [[ "${!varname}" != "" ]] ; then
             rm -fr "${!varname}" || true
         fi
     done
 }
+
+run_inplace_edits () {
+    local basename dirname temp_filename inplace_varname
+    declare -a inplace_cmd
+    if (( !${#inplace[@]} )) ; then
+        return
+    fi
+    for filename in "$@" ; do
+        dirname="$(dirname "${filename}")"
+        basename="$(basename "${filename}")"
+        temp_filename="${dirname}/.tmp.$$.${basename}"
+        for inplace_varname in "${inplace[@]}" ; do
+            eval "inplace_cmd=(\"\${${inplace_varname}[@]}\")"
+            "${inplace_cmd[@]}" <"${filename}" >"${temp_filename}"
+            mv "${temp_filename}" "${filename}"
+        done
+    done
+}
+
+usage () { cat <<EOF; }
+gdiff [OPTIONS ...] FILE1 FILE2
+gdiff [OPTIONS ...] DIR1 DIR2
+    -h      Display this message.
+    -w      Ignore all whitespace.
+    -ww     Word diff.
+    -b      Ignore whitespace changes.
+    -a      Treat all files as text.
+    -U INT  Output INT lines of context.
+    -i CMD [ARGS ...] \;
+            Edit files in-place by piping them through the supplied command
+            before diffing.  Can be used multiple times.
+EOF
 
 main "$@"
